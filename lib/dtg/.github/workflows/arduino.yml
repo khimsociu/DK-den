@@ -1,0 +1,136 @@
+name: Arduino library CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/arduino-lint-action@v2
+        with:
+          library-manager: update
+          compliance: strict
+          project-type: library
+
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install g++
+        run: sudo apt-get update && sudo apt-get install -y g++
+      - name: Run host tests
+        working-directory: tests
+        run: |
+          set -eu
+          COMMON=(-std=c++17 -I../src)
+          g++ "${COMMON[@]}" -o ota_sha256_test ota_sha256_test.cpp && ./ota_sha256_test
+          g++ "${COMMON[@]}" -o ota_policy_test ota_policy_test.cpp && ./ota_policy_test
+          g++ "${COMMON[@]}" -o core_cfg_logic_test core_cfg_logic_test.cpp && ./core_cfg_logic_test
+          g++ "${COMMON[@]}" -o tls_roots_parse_test tls_roots_parse_test.cpp && ./tls_roots_parse_test
+          g++ "${COMMON[@]}" -o modbus_codec_test modbus_codec_test.cpp ../src/modbus/modbus_codec.cpp && ./modbus_codec_test
+          g++ "${COMMON[@]}" -Istubs -o dtg_param_test dtg_param_test.cpp && ./dtg_param_test
+          g++ "${COMMON[@]}" -DDTG_TIMER_MAX=4 -o timer_test timer_test.cpp ../src/dtg_timer.cpp && ./timer_test
+          g++ "${COMMON[@]}" -o heap_guard_logic_test heap_guard_logic_test.cpp && ./heap_guard_logic_test
+          g++ "${COMMON[@]}" -o heap_telemetry_test heap_telemetry_test.cpp && ./heap_telemetry_test
+          g++ "${COMMON[@]}" -o wifi_cmd_payload_test wifi_cmd_payload_test.cpp && ./wifi_cmd_payload_test
+          g++ "${COMMON[@]}" -o reset_reason_map_test reset_reason_map_test.cpp && ./reset_reason_map_test
+
+  compile-esp32:
+    needs: [lint, host-tests]
+    # compile-sketches@v1 pins Python 3.12.4, which Ubuntu 26.04 (ubuntu-latest) no longer ships.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        fqbn:
+          - esp32:esp32:esp32
+          - esp32:esp32:esp32c3:PartitionScheme=huge_app
+    steps:
+      - uses: actions/checkout@v4
+      # The Espressif tool index often returns 504 for xtensa-esp-elf-gdb. compile-sketches
+      # installs the core once and fails the job. A successful install is cached in
+      # ~/.arduino15, so the action's own install then becomes a no-op.
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install ESP32 core (retry on 504)
+        run: |
+          set -eu
+          url="https://espressif.github.io/arduino-esp32/package_esp32_index.json"
+          n=0
+          until arduino-cli core install --additional-urls "$url" esp32:esp32; do
+            n=$((n + 1))
+            if [ "$n" -ge 4 ]; then
+              echo "ESP32 core install failed after ${n} attempts"
+              exit 1
+            fi
+            echo "core install failed (attempt ${n}), retrying"
+            sleep $((n * 15))
+          done
+      - uses: arduino/compile-sketches@v1
+        with:
+          fqbn: ${{ matrix.fqbn }}
+          enable-warnings-report: true
+          sketch-paths: |
+            - examples/ESP32/ESP32_WiFi_Basic
+            - examples/ESP32/ESP32_WiFi_Uplink
+            - examples/ESP32/ESP32_WiFi_Downlink
+            - examples/ESP32/ESP32_WiFi_Listen
+            - examples/ESP32/ESP32_WiFi_Gateway
+            - examples/ESP32/ESP32_WiFi_Modbus
+            - examples/ESP32/ESP32_WiFi_Gps
+            - examples/ESP32/ESP32_Gsm_Basic
+            - examples/ESP32/ESP32_Gsm_Gps
+            - examples/ESP32/ESP32_TC5L_Modbus_Bare
+            - examples/ESP32/ESP32_TC5L_Modbus_Gateway
+          platforms: |
+            - name: esp32:esp32
+              source-url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          libraries: |
+            - source-path: ./
+            - name: PubSubClient
+            - name: ArduinoJson
+            - name: TinyGPSPlus
+
+  compile-esp8266:
+    needs: [lint, host-tests]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        fqbn:
+          - esp8266:esp8266:nodemcuv2:eesz=4M2M
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install ESP8266 core
+        run: |
+          set -eu
+          url="https://arduino.esp8266.com/stable/package_esp8266com_index.json"
+          n=0
+          until arduino-cli core install --additional-urls "$url" esp8266:esp8266; do
+            n=$((n + 1))
+            if [ "$n" -ge 4 ]; then
+              echo "ESP8266 core install failed after ${n} attempts"
+              exit 1
+            fi
+            echo "core install failed (attempt ${n}), retrying"
+            sleep $((n * 15))
+          done
+      - uses: arduino/compile-sketches@v1
+        with:
+          fqbn: ${{ matrix.fqbn }}
+          enable-warnings-report: true
+          sketch-paths: |
+            - examples/ESP8266/ESP8266_WiFi_Uplink
+            - examples/ESP8266/ESP8266_WiFi_Gateway
+          platforms: |
+            - name: esp8266:esp8266
+              source-url: https://arduino.esp8266.com/stable/package_esp8266com_index.json
+          libraries: |
+            - source-path: ./
+            - name: PubSubClient
+            - name: ArduinoJson
+
